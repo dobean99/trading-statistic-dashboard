@@ -578,14 +578,16 @@ function computeTimeAnalysis(trades) {
 }
 
 // ============================================================================
-// Anthropic API
+// LLM API — Groq (OpenAI-compatible). Hits a same-origin proxy so the API key
+// stays server-side. Configure the proxy in vite.config.js (dev) and as a
+// Cloudflare Pages Function / equivalent (prod). Set GROQ_API_KEY there.
 // ============================================================================
-async function callAnthropic(prompt) {
-  const response = await fetch('https://api.anthropic.com/v1/messages', {
+async function callLLM(prompt) {
+  const response = await fetch('/api/groq/openai/v1/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      model: 'claude-sonnet-4-20250514',
+      model: 'llama-3.3-70b-versatile',
       max_tokens: 1500,
       messages: [{ role: 'user', content: prompt }],
     }),
@@ -595,7 +597,7 @@ async function callAnthropic(prompt) {
     throw new Error(`API error ${response.status}: ${text || response.statusText}`);
   }
   const data = await response.json();
-  return data.content.map(item => item.text || '').join('\n');
+  return data.choices?.[0]?.message?.content || '';
 }
 
 // ============================================================================
@@ -1042,7 +1044,7 @@ function AnalyzeThis({ buildPrompt, label = 'Analyze This' }) {
   const run = useCallback(async () => {
     setLoading(true); setError(null); setResult(null); setOpen(true);
     try {
-      const text = await callAnthropic(buildPrompt());
+      const text = await callLLM(buildPrompt());
       setResult(text);
     } catch (e) {
       setError(e.message || 'Request failed');
@@ -2050,7 +2052,7 @@ function AIInsightsTab({ trades, core, bySymbol, byReason, bySession, soEvents, 
         `8. **Risk Management Score** (1-10): based on R:R, profit factor, max consecutive losses, stop-out frequency, position sizing\n` +
         `9. **Specific Actionable Recommendations**: 5-7 concrete things to do differently, prioritized by impact\n\n` +
         `Format your response in clear sections with headers. Be direct and specific — reference the actual numbers. Do not be generic. If something is bad, say it clearly.`;
-      const text = await callAnthropic(prompt);
+      const text = await callLLM(prompt);
       setReport(text);
     } catch (e) {
       setError(e.message || 'Request failed');
@@ -2062,7 +2064,7 @@ function AIInsightsTab({ trades, core, bySymbol, byReason, bySession, soEvents, 
     setFollowLoading(true); setFollowAnswer(null);
     try {
       const prompt = `Trader asks a specific question about their data:\n\n"${followQ.trim()}"\n\nUse this metrics context to answer (be specific, reference numbers):\n\n${buildContext()}`;
-      const text = await callAnthropic(prompt);
+      const text = await callLLM(prompt);
       setFollowAnswer(text);
     } catch (e) {
       setFollowAnswer(`Error: ${e.message || 'Request failed'}`);

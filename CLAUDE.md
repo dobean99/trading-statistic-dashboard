@@ -29,8 +29,8 @@ There is no test suite, lint config, or typecheck step. Verification = `npm run 
 - **Single `.jsx` file** with default export. No multi-file split, no extracted modules — keep all React components and helpers inline in `trading-dashboard.jsx`.
 - **React state only** — no `localStorage` / `sessionStorage`.
 - **No `<form>` tags** — wire interactions via `onClick` / `onChange`.
-- **Only outbound runtime call permitted**: `https://api.anthropic.com/v1/messages` (no API key in code; the spec assumes a host that injects auth — calling this from a normal browser dev server will fail CORS / 401).
-- Send **aggregated metrics** to the Anthropic API, never raw trade rows.
+- **Only outbound runtime call permitted**: a single LLM endpoint via same-origin proxy (`/api/groq/openai/v1/chat/completions`). No keys in client code — the proxy (Vite dev or a serverless function in prod) injects `Authorization: Bearer ${GROQ_API_KEY}`.
+- Send **aggregated metrics** to the LLM, never raw trade rows.
 - Datasets reach **3k–10k+ trades** — every derived value goes through `useMemo`; trade log paginates at 50; cumulative-PnL line drops point markers above 500 trades; scatter plots use `r=3, opacity 0.6`.
 
 ## Architecture: The Normalized Schema is the Spine
@@ -84,12 +84,17 @@ Sessions overlap in reality, but `getSession()` bucketizes each trade into exact
 
 ## AI Calls
 
-`callAnthropic(prompt)` posts to `https://api.anthropic.com/v1/messages` with model `claude-sonnet-4-20250514`. Two entry points:
+`callLLM(prompt)` posts to `/api/groq/openai/v1/chat/completions` (model `llama-3.3-70b-versatile`, OpenAI-compatible response shape — read `data.choices[0].message.content`). The path is same-origin; a proxy injects the bearer token:
+
+- **Dev**: `vite.config.js` proxies `/api/groq/*` → `https://api.groq.com/*` and adds `Authorization: Bearer ${GROQ_API_KEY}`. Run with the env var set, e.g. PowerShell `$env:GROQ_API_KEY="gsk_..."; npm run dev`.
+- **Prod**: deploy a serverless function (e.g. Cloudflare Pages Function at `functions/api/groq/[[path]].js`) that does the same forwarding.
+
+Two entry points in the app:
 
 - The **AI Insights tab** sends the full structured prompt + a follow-up Q&A box.
 - Each data tab embeds an `<AnalyzeThis>` modal that sends only that tab's aggregates.
 
-When changing prompts, keep the "aggregates only, never raw trades" rule.
+When changing prompts, keep the "aggregates only, never raw trades" rule. To swap providers, change the URL, model, body shape, and response-parsing line in `callLLM` — call sites don't need to change.
 
 ## Theme Tokens
 
