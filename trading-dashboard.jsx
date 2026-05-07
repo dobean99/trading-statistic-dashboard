@@ -81,6 +81,18 @@ const BROKER_PRESETS = {
   Binance: ['Symbol','Side','Qty','Entry Price','Exit Price','Realized Profit','Time'],
 };
 
+// Timezone offset presets (hours from UTC). Sessions are bucketed in UTC,
+// so server-time CSVs (most MT4/5 brokers) need to be shifted before analysis.
+const TIMEZONE_PRESETS = [
+  { value: 0,  label: 'UTC (Binance, Exness web export)' },
+  { value: 1,  label: 'GMT+1 — CET' },
+  { value: 2,  label: 'GMT+2 — EET (winter), most MT4/5 brokers' },
+  { value: 3,  label: 'GMT+3 — EEST (summer), IC Markets / XM / Pepperstone' },
+  { value: -4, label: 'GMT-4 — EDT (US Eastern, summer)' },
+  { value: -5, label: 'GMT-5 — EST (US Eastern, winter)' },
+  { value: 'custom', label: 'Custom (enter offset in hours)' },
+];
+
 // ============================================================================
 // Helpers
 // ============================================================================
@@ -231,11 +243,15 @@ const fmtDuration = (ms) => {
 // ============================================================================
 // Cleaning pipeline
 // ============================================================================
-function cleanData(rawRows, mapping) {
+function cleanData(rawRows, mapping, tzOffsetHours = 0) {
   const inv = {};
   for (const [csvCol, field] of Object.entries(mapping)) {
     if (field && field !== '__skip__') inv[field] = csvCol;
   }
+
+  // Sessions are computed in UTC. If the CSV is in broker server time (e.g. GMT+3),
+  // subtract the offset so 12:00 GMT+3 becomes 09:00 UTC — the actual instant.
+  const offsetMs = (Number(tzOffsetHours) || 0) * 3600000;
 
   const trades = [];
   const dropped = [];
@@ -251,10 +267,12 @@ function cleanData(rawRows, mapping) {
 
     if (inv.open_time)  {
       t.open_time = parseDate(row[inv.open_time]);
+      if (t.open_time && offsetMs) t.open_time = new Date(t.open_time.getTime() - offsetMs);
       dateParseStats.open_time[t.open_time ? 'ok' : 'fail']++;
     }
     if (inv.close_time) {
       t.close_time = parseDate(row[inv.close_time]);
+      if (t.close_time && offsetMs) t.close_time = new Date(t.close_time.getTime() - offsetMs);
       dateParseStats.close_time[t.close_time ? 'ok' : 'fail']++;
     }
 
@@ -840,6 +858,17 @@ function StepMapping({ parsed, onConfirm, onBack }) {
   const broker = useMemo(() => detectBrokerPreset(parsed.columns), [parsed.columns]);
   const [mapping, setMapping] = useState(initialMapping);
 
+  // Timezone — sessions are bucketed in UTC, so broker server-time CSVs need an offset.
+  const timeColumnsLookUtc = useMemo(() => {
+    const timeCols = Object.entries(mapping)
+      .filter(([_c, f]) => f === 'open_time' || f === 'close_time')
+      .map(([c]) => c);
+    return timeCols.length > 0 && timeCols.every(c => /utc/i.test(c));
+  }, [mapping]);
+  const [tzPreset, setTzPreset] = useState(0);
+  const [tzCustom, setTzCustom] = useState(0);
+  const tzOffsetHours = tzPreset === 'custom' ? Number(tzCustom) || 0 : tzPreset;
+
   const usedFields = useMemo(() => {
     const m = {};
     Object.values(mapping).forEach(f => { if (f && f !== '__skip__') m[f] = (m[f] || 0) + 1; });
@@ -926,9 +955,57 @@ function StepMapping({ parsed, onConfirm, onBack }) {
         )}
       </Card>
 
+      <Card title="Timestamp timezone" className="mt-4">
+        <div className="text-sm text-slate-400 mb-3">
+          Trading-session analysis assumes UTC. If your CSV is in <strong className="text-slate-200">broker server time</strong>{' '}
+          (most MT4/5 brokers — IC Markets, XM, Pepperstone, etc. — run on GMT+2 or GMT+3), pick that offset here so sessions are bucketed correctly.
+        </div>
+        <div className="flex flex-wrap items-center gap-3">
+          <select
+            value={tzPreset}
+            onChange={(e) => {
+              const v = e.target.value === 'custom' ? 'custom' : Number(e.target.value);
+              setTzPreset(v);
+            }}
+            className="bg-slate-900 border border-slate-600 rounded px-2 py-1.5 text-sm text-white min-w-[280px]"
+          >
+            {TIMEZONE_PRESETS.map(p => (
+              <option key={String(p.value)} value={p.value}>{p.label}</option>
+            ))}
+          </select>
+          {tzPreset === 'custom' && (
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-slate-400">Hours from UTC:</span>
+              <input
+                type="number"
+                step="0.5"
+                value={tzCustom}
+                onChange={(e) => setTzCustom(e.target.value)}
+                className="bg-slate-900 border border-slate-600 rounded px-2 py-1.5 text-sm text-white w-24"
+              />
+            </div>
+          )}
+          <div className="text-xs text-slate-500">
+            Effective: <strong className="text-slate-300">{tzOffsetHours === 0 ? 'UTC (no shift)' : `UTC${tzOffsetHours > 0 ? '+' : ''}${tzOffsetHours}`}</strong>
+          </div>
+        </div>
+        {timeColumnsLookUtc && tzOffsetHours !== 0 && (
+          <div className="mt-3 p-3 rounded-lg bg-amber-900/30 border border-amber-800 text-amber-300 text-sm flex items-center gap-2">
+            <AlertTriangle size={16} />
+            Your time column name contains "UTC" but you've selected a non-UTC offset. Double-check — the CSV may already be in UTC.
+          </div>
+        )}
+        {!timeColumnsLookUtc && tzOffsetHours === 0 && (
+          <div className="mt-3 p-3 rounded-lg bg-slate-700/30 border border-slate-600 text-slate-300 text-sm flex items-start gap-2">
+            <AlertTriangle size={16} className="mt-0.5 text-amber-400 shrink-0" />
+            <span>Time column doesn't say "UTC". If you exported from MetaTrader 4/5, it's almost certainly broker server time — pick GMT+2 or GMT+3 above before continuing, or your sessions will be off by 2–3 hours.</span>
+          </div>
+        )}
+      </Card>
+
       <div className="flex items-center justify-between mt-4">
         <Btn variant="ghost" icon={ChevronLeft} onClick={onBack}>Back</Btn>
-        <Btn variant="primary" disabled={!canProceed} onClick={() => onConfirm(mapping)} icon={ChevronRight}>
+        <Btn variant="primary" disabled={!canProceed} onClick={() => onConfirm(mapping, tzOffsetHours)} icon={ChevronRight}>
           Next → Clean Data
         </Btn>
       </div>
@@ -939,8 +1016,8 @@ function StepMapping({ parsed, onConfirm, onBack }) {
 // ============================================================================
 // Step 3: Cleaning report
 // ============================================================================
-function StepClean({ parsed, mapping, onLaunch, onBack }) {
-  const cleaned = useMemo(() => cleanData(parsed.rows, mapping), [parsed.rows, mapping]);
+function StepClean({ parsed, mapping, tzOffsetHours, onLaunch, onBack }) {
+  const cleaned = useMemo(() => cleanData(parsed.rows, mapping, tzOffsetHours), [parsed.rows, mapping, tzOffsetHours]);
   const { trades, dropped, mapping: inv, warnings } = cleaned;
   const [showDropped, setShowDropped] = useState(false);
 
@@ -2213,10 +2290,11 @@ export default function TradingDashboardApp() {
   const [step, setStep]   = useState(1);
   const [parsed, setParsed] = useState(null);
   const [mapping, setMapping] = useState(null);
+  const [tzOffsetHours, setTzOffsetHours] = useState(0);
   const [data, setData] = useState(null);
 
   const reset = useCallback(() => {
-    setStep(1); setParsed(null); setMapping(null); setData(null);
+    setStep(1); setParsed(null); setMapping(null); setTzOffsetHours(0); setData(null);
   }, []);
 
   const loadSample = useCallback(() => {
@@ -2255,7 +2333,7 @@ export default function TradingDashboardApp() {
         {step === 2 && parsed && (
           <StepMapping
             parsed={parsed}
-            onConfirm={(m) => { setMapping(m); setStep(3); }}
+            onConfirm={(m, tz) => { setMapping(m); setTzOffsetHours(tz); setStep(3); }}
             onBack={() => setStep(1)}
           />
         )}
@@ -2263,6 +2341,7 @@ export default function TradingDashboardApp() {
           <StepClean
             parsed={parsed}
             mapping={mapping}
+            tzOffsetHours={tzOffsetHours}
             onLaunch={({ trades, mapping: inv }) => setData({ trades, mapping: inv, fileName: parsed.fileName })}
             onBack={() => setStep(2)}
           />
